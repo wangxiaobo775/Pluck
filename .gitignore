@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+build/
+**/build/
+**/deployed/
+debug.keystore
+**/debug.keystore
