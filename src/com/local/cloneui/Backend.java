@@ -1427,8 +1427,6 @@ final class Backend {
             "com.android.providers.downloads.ui",
             "com.android.providers.media",
             "com.android.providers.userdictionary",
-            "com.samsung.android.providers.media",
-            "com.samsung.android.providers.trash",
             "com.sec.android.provider.badge",
             "com.android.intentresolver",            // share sheet
             "com.google.android.photopicker",
@@ -1548,7 +1546,13 @@ final class Backend {
             "com.android.dynsystem",
             "com.samsung.android.stickercenter",
             "com.samsung.android.app.dressroom",
-            "com.sec.android.app.quicktool"));
+            "com.sec.android.app.quicktool",
+            // Camera post-processing / filter / diagnostic daemons (uid 1000)
+            "com.samsung.android.globalpostprocmgr",
+            "com.samsung.android.gimbaltrackingkit",
+            "com.samsung.android.vtcamerasettings",
+            "com.samsung.android.provider.filterprovider",
+            "com.sec.android.iaft"));
     static final String TRIM_PAUSE = "0.2"; // seconds between uninstalls; each one is a broadcast in system_server
     static final Pattern SYSTEM_PKG_LINE = Pattern.compile("^package:(\\S+) uid:(\\d+)");
     static final Pattern OVERLAY_LINE = Pattern.compile("^\\s*\\[.\\]\\s*(\\S+)", Pattern.MULTILINE);
@@ -1640,8 +1644,23 @@ final class Backend {
         for (String p : plan) {
             (left.containsKey(p) ? kept : done).add(p);
         }
+        // Packages that refuse pm uninstall --user (e.g. com.osp.app.signin,
+        // com.samsung.android.fmm, com.sec.enterprise.knox.cloudmdm.smdms):
+        // disable and force-stop them so they cannot run in the clone user.
+        if (!kept.isEmpty()) {
+            StringBuilder dis = new StringBuilder("PATH=/system/bin:/system/xbin");
+            for (String p : kept) {
+                dis.append("; /system/bin/pm disable-user --user ").append(user).append(' ').append(quote(p)).append(" >/dev/null 2>&1");
+                dis.append("; /system/bin/am force-stop --user ").append(user).append(' ').append(quote(p)).append(" >/dev/null 2>&1");
+            }
+            try {
+                run(30, "/system/bin/su", "2000", "-c", dis.toString());
+            } catch (Timeout e) {
+                log("pm disable-user --user " + user + ": timed out");
+            }
+        }
         appendLines(trimRecord(user), done, true);
-        log("trim " + user + ": removed " + done.size() + ", kept " + kept);
+        log("trim " + user + ": removed " + done.size() + ", disabled " + kept);
         return done;
     }
 
@@ -1658,6 +1677,17 @@ final class Backend {
         }
         List<String> list = new ArrayList<>(pkgs);
         shellLoop("install-existing", user, list);
+        // Re-enable any packages that were disabled when uninstall was refused
+        Out disOut = pm(false, "list", "packages", "-d", "--user", String.valueOf(user));
+        for (String line : disOut.text.split("\n")) {
+            line = line.trim();
+            if (line.startsWith("package:")) {
+                String p = line.substring("package:".length()).trim();
+                if (!GMS.equals(p)) {
+                    pm(true, "enable", "--user", String.valueOf(user), p);
+                }
+            }
+        }
         Map<String, Integer> present = systemPackages(user);
         List<String> restored = new ArrayList<>();
         List<String> missing = new ArrayList<>();
@@ -1735,18 +1765,20 @@ final class Backend {
         }
         int uid = Integer.parseInt(m.group(1));
         log("created clone " + uid + " " + name);
-        run(120, "/system/bin/am", "start-user", "-w", String.valueOf(uid));
-        run("/system/bin/settings", "put", "--user", String.valueOf(uid), "secure", "user_setup_complete", "1");
+        // Trim and disable GMS BEFORE starting the user so ~220 Samsung/GMS
+        // apps never receive LOCKED_BOOT_COMPLETED / BOOT_COMPLETED.
         List<String> tried = trimPlan(uid);
         trimUser(uid, false);
-        // Some packages arrive in a new clone while the first pass runs
-        // (seen: Samsung Contacts and its overlay); one more pass for those.
-        trimUser(uid, false, new HashSet<>(tried));
         try {
             setGms(uid, false); // off by default; the page turns it on per clone
         } catch (Fail e) {
             log("gms off " + uid + ": " + e.getMessage());
         }
+        run(120, "/system/bin/am", "start-user", "-w", String.valueOf(uid));
+        run("/system/bin/settings", "put", "--user", String.valueOf(uid), "secure", "user_setup_complete", "1");
+        // Some packages arrive in a new clone when the user first starts
+        // (seen: Samsung Contacts and its overlay); one more pass for those.
+        trimUser(uid, false, new HashSet<>(tried));
         return uid;
     }
 
