@@ -12,6 +12,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Writer;
+import java.lang.reflect.Method;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
@@ -1631,11 +1632,58 @@ final class Backend {
     }
 
     /**
-     * Run `pm COMMAND --user N PKG` for each pkg in one uid-2000 shell, one at
-     * a time. Callers check the outcome by listing packages afterwards: pm's
-     * exit status is not reliable, and a timeout may stop it halfway.
+     * Uninstall or install-existing each pkg for user via in-process Binder
+     * calls to IPackageManager (zero shell/pm process forks), falling back to
+     * a shell loop only if Binder reflection fails.
      */
     static void shellLoop(String command, int user, List<String> pkgs) throws Fail {
+        if (pkgs.isEmpty()) {
+            return;
+        }
+        try {
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            Object binder = sm.getMethod("getService", String.class).invoke(null, "package");
+            Class<?> stub = Class.forName("android.content.pm.IPackageManager$Stub");
+            Object pm = stub.getMethod("asInterface", Class.forName("android.os.IBinder")).invoke(null, binder);
+            if ("uninstall".equals(command)) {
+                Method delete = pm.getClass().getMethod("deletePackageAsUser",
+                        String.class, int.class, Class.forName("android.content.pm.IPackageDeleteObserver"),
+                        int.class, int.class);
+                for (String p : pkgs) {
+                    // 0x00000004 = PackageManager.DELETE_SYSTEM_APP
+                    delete.invoke(pm, p, -1, null, user, 0x00000004);
+                    sleep(5);
+                }
+                // deletePackageAsUser is asynchronous inside system_server; wait
+                // until the user's package count settles before checking outcome.
+                long deadline = System.currentTimeMillis() + 5000L + 120L * pkgs.size();
+                int lastCount = -1;
+                int stable = 0;
+                while (System.currentTimeMillis() < deadline) {
+                    sleep(150);
+                    int cur = systemPackages(user).size();
+                    if (cur > 0 && cur == lastCount) {
+                        if (++stable >= 2) {
+                            break;
+                        }
+                    } else {
+                        stable = 0;
+                        lastCount = cur;
+                    }
+                }
+                return;
+            } else if ("install-existing".equals(command)) {
+                Method install = pm.getClass().getMethod("installExistingPackageAsUser",
+                        String.class, int.class, int.class, int.class, List.class);
+                for (String p : pkgs) {
+                    // 0x00400000 = PackageManager.INSTALL_FULL_APP
+                    install.invoke(pm, p, user, 0x00400000, 0, null);
+                }
+                return;
+            }
+        } catch (Exception e) {
+            log("binder pm " + command + " fallback: " + e);
+        }
         StringBuilder list = new StringBuilder();
         for (String p : pkgs) {
             list.append(' ').append(quote(p));
@@ -1780,17 +1828,47 @@ final class Backend {
             }
         }
         String name = "克隆" + (highest + 1);
-        Out r = run(120, "/system/bin/pm", "create-user", "--profileOf", "0",
-                "--user-type", CLONE_TYPE, name);
-        Matcher m = CREATED.matcher(r.text);
-        if (!m.find()) {
-            throw new Fail(r.text.isEmpty() ? "创建分身失败" : r.text);
+        List<String> preTrim = trimPlan(0);
+        int uid = -1;
+        try {
+            Class<?> sm = Class.forName("android.os.ServiceManager");
+            Object binder = sm.getMethod("getService", String.class).invoke(null, "user");
+            Class<?> stub = Class.forName("android.os.IUserManager$Stub");
+            Object um = stub.getMethod("asInterface", Class.forName("android.os.IBinder")).invoke(null, binder);
+            Method create = um.getClass().getMethod("createProfileForUserWithThrow",
+                    String.class, String.class, int.class, int.class, String[].class);
+            Object userInfo = create.invoke(um, name, CLONE_TYPE, 0, 0, preTrim.toArray(new String[0]));
+            if (userInfo != null) {
+                uid = userInfo.getClass().getField("id").getInt(userInfo);
+            }
+        } catch (Exception e) {
+            log("createProfileForUserWithThrow fallback: " + e);
         }
-        int uid = Integer.parseInt(m.group(1));
+        if (uid < 0) {
+            Out r = run(120, "/system/bin/pm", "create-user", "--profileOf", "0",
+                    "--user-type", CLONE_TYPE, name);
+            Matcher m = CREATED.matcher(r.text);
+            if (!m.find()) {
+                throw new Fail(r.text.isEmpty() ? "创建分身失败" : r.text);
+            }
+            uid = Integer.parseInt(m.group(1));
+        } else {
+            Map<String, Integer> installedNow = systemPackages(uid);
+            List<String> skipped = new ArrayList<>();
+            for (String p : preTrim) {
+                if (!installedNow.containsKey(p)) {
+                    skipped.add(p);
+                }
+            }
+            if (!skipped.isEmpty()) {
+                appendLines(trimRecord(uid), skipped, true);
+                log("pre-trimmed " + uid + ": skipped " + skipped.size() + " packages at creation");
+            }
+        }
         log("created clone " + uid + " " + name);
-        // Trim and disable GMS BEFORE starting the user so ~220 Samsung/GMS
-        // apps never receive LOCKED_BOOT_COMPLETED / BOOT_COMPLETED.
-        List<String> tried = trimPlan(uid);
+        // Trim any remaining packages and disable GMS BEFORE starting the user
+        List<String> tried = new ArrayList<>(preTrim);
+        tried.addAll(trimPlan(uid));
         trimUser(uid, false);
         try {
             setGms(uid, false); // off by default; the page turns it on per clone
