@@ -1441,24 +1441,10 @@ final class Backend {
             "com.samsung.android.secsoundpicker",
             "com.android.systemui",
             // Mainline modules and their shims
-            "androidx.core.uwb.backend",
-            "com.android.cts.ctsshim",
-            "com.android.cts.priv.ctsshim",
-            "com.google.android.adservices.api",
-            "com.google.mainline.adservices",
-            "com.google.android.appsearch.apk",
             "com.google.android.configupdater",
             "com.google.android.ext.services",
             "com.google.android.ext.shared",
-            "com.google.android.federatedcompute",
-            "com.google.android.healthconnect.controller",
-            "com.google.android.health.connect.backuprestore",
             "com.google.android.modulemetadata",
-            "com.google.android.ondevicepersonalization.services",
-            "com.google.android.rkpdapp",
-            "com.google.android.sdksandbox",
-            "com.google.mainline.telemetry",
-            "com.google.ar.core",
             // Keyboard fallback when SysGuard's ime hooks are off
             "com.samsung.android.honeyboard",
             "com.samsung.android.sdk.handwriting",
@@ -1480,11 +1466,7 @@ final class Backend {
             // Knox plumbing behind Samsung's own profiles
             "com.samsung.android.container",
             "com.samsung.android.knox.kpecore",
-            "com.samsung.android.knox.sandbox",
-            "com.samsung.android.mdm",
-            "com.samsung.klmsagent",
-            "com.samsung.android.dsms",
-            "com.samsung.android.rampart"));
+            "com.samsung.android.knox.sandbox"));
     static final Pattern OVERLAY_NAME = Pattern.compile(
             "auto_generated.*rro|(^|\\.)overlay(\\.|$)|\\.resources?$|\\.res$|\\.(gpu|game)drivers?(\\.|$)");
     // Removed although their appId is a system one (shared uid): each kept a
@@ -1552,7 +1534,37 @@ final class Backend {
             "com.samsung.android.gimbaltrackingkit",
             "com.samsung.android.vtcamerasettings",
             "com.samsung.android.provider.filterprovider",
-            "com.sec.android.iaft"));
+            "com.sec.android.iaft",
+            // Shared-UID packages also omitted by Samsung Secure Folder (user 150)
+            "com.samsung.android.scloud",
+            "com.samsung.android.themecenter",
+            "com.sec.android.sdhms",
+            "com.samsung.android.beaconmanager",
+            "com.sec.android.app.bluetoothagent",
+            "com.samsung.android.svcagent",
+            "com.sec.bcservice",
+            "com.sec.usbsettings",
+            "com.samsung.aasaservice",
+            "com.samsung.android.bbc.bbcagent",
+            "com.samsung.android.da.daagent",
+            "com.android.stk",
+            "com.android.stk2",
+            "com.samsung.android.app.telephonyui",
+            "com.samsung.sec.android.application.csc",
+            "com.sec.app.RilErrorNotifier",
+            // Gallery AI / Wi-Fi AI / display / Quick Share daemons (main user only)
+            "com.samsung.android.photoremasterservice",
+            "com.samsung.android.motionphoto.app",
+            "com.samsung.android.vexfwk.service",
+            "com.samsung.android.wifi.ai",
+            "com.samsung.android.wifi.intelligence",
+            "com.sec.mhs.smarttethering",
+            "com.samsung.android.smartface",
+            "com.samsung.android.brightnessbackupservice",
+            "com.sec.android.smartfpsadjuster",
+            "com.qti.snapdragon.qdcm_ff",
+            "com.samsung.android.app.sharelive",
+            "com.samsung.chn.apps.devicemanagement"));
     static final String TRIM_PAUSE = "0.2"; // seconds between uninstalls; each one is a broadcast in system_server
     static final Pattern SYSTEM_PKG_LINE = Pattern.compile("^package:(\\S+) uid:(\\d+)");
     static final Pattern OVERLAY_LINE = Pattern.compile("^\\s*\\[.\\]\\s*(\\S+)", Pattern.MULTILINE);
@@ -1646,17 +1658,17 @@ final class Backend {
         }
         // Packages that refuse pm uninstall --user (e.g. com.osp.app.signin,
         // com.samsung.android.fmm, com.sec.enterprise.knox.cloudmdm.smdms):
-        // disable and force-stop them so they cannot run in the clone user.
+        // disable and force-stop them as root so they cannot run in the clone user.
         if (!kept.isEmpty()) {
-            StringBuilder dis = new StringBuilder("PATH=/system/bin:/system/xbin");
+            StringBuilder dis = new StringBuilder("export PATH=/system/bin:/system/xbin");
             for (String p : kept) {
-                dis.append("; /system/bin/pm disable-user --user ").append(user).append(' ').append(quote(p)).append(" >/dev/null 2>&1");
+                dis.append("; /system/bin/cmd package disable-user --user ").append(user).append(' ').append(quote(p)).append(" >/dev/null 2>&1");
                 dis.append("; /system/bin/am force-stop --user ").append(user).append(' ').append(quote(p)).append(" >/dev/null 2>&1");
             }
             try {
-                run(30, "/system/bin/su", "2000", "-c", dis.toString());
+                run(30, "/system/bin/sh", "-c", dis.toString());
             } catch (Timeout e) {
-                log("pm disable-user --user " + user + ": timed out");
+                log("cmd package disable-user --user " + user + ": timed out");
             }
         }
         appendLines(trimRecord(user), done, true);
@@ -1678,15 +1690,11 @@ final class Backend {
         List<String> list = new ArrayList<>(pkgs);
         shellLoop("install-existing", user, list);
         // Re-enable any packages that were disabled when uninstall was refused
-        Out disOut = pm(false, "list", "packages", "-d", "--user", String.valueOf(user));
-        for (String line : disOut.text.split("\n")) {
-            line = line.trim();
-            if (line.startsWith("package:")) {
-                String p = line.substring("package:".length()).trim();
-                if (!GMS.equals(p)) {
-                    pm(true, "enable", "--user", String.valueOf(user), p);
-                }
-            }
+        for (String p : Arrays.asList(
+                "com.osp.app.signin",
+                "com.samsung.android.fmm",
+                "com.sec.enterprise.knox.cloudmdm.smdms")) {
+            run("/system/bin/cmd", "package", "enable", "--user", String.valueOf(user), p);
         }
         Map<String, Integer> present = systemPackages(user);
         List<String> restored = new ArrayList<>();
