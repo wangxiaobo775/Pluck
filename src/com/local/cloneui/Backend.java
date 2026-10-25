@@ -76,6 +76,8 @@ final class Backend {
     static final String VPN_LIB = ADB + "/clone-lib.sh";
     static final String VPN_SCRIPT = ADB + "/clone-vpn.sh";
     static final String VPN_SERVICE = ADB + "/service.d/clone-vpn.sh";
+    static final String VPN_USERS_FILE = ADB + "/clone-vpn.users";
+    static final String VPN_USERS_KEY = "cloneui_vpn_users";
     static final String VPN_CHAIN = "clone_vpn_guard";
     static final long LOG_MAX = 262144;
 
@@ -800,34 +802,100 @@ final class Backend {
         return exists(VPN_SERVICE);
     }
 
-    static void setVpnGuard(boolean on) throws Fail {
-        ensureVpnScripts();
-        if (on) {
-            extractAsset("service-clone-vpn.sh", VPN_SERVICE, 0755);
-            run(20, "/system/bin/nsenter", "-t", "1", "-m", "--", "/system/bin/sh", VPN_SERVICE);
-            if (!cloneIds().isEmpty()) {
-                Out r = run(30, "/system/bin/nsenter", "-t", "1", "-m", "--", "/system/bin/sh", VPN_SCRIPT);
-                if (r.code != 0 && !vpnGuardEnabled()) {
-                    throw new Fail(r.text.isEmpty() ? "启用 VPN 断网保护失败" : r.text);
+    static List<Integer> vpnEnabledUsers(JSONObject meta) {
+        List<Integer> out = new ArrayList<>();
+        boolean firstMigration = !exists(VPN_USERS_FILE);
+        boolean legacyOn = firstMigration && exists(VPN_SERVICE);
+        for (String key : new TreeSet<>(iterable(meta.keys()))) {
+            JSONObject m = meta.optJSONObject(key);
+            if (m == null) {
+                continue;
+            }
+            boolean on = m.has("vpn") ? m.optBoolean("vpn", false) : legacyOn;
+            if (on) {
+                try {
+                    out.add(Integer.parseInt(key));
+                } catch (NumberFormatException ignored) {
                 }
             }
-            log("vpn guard on");
+        }
+        Collections.sort(out);
+        return out;
+    }
+
+    static void syncVpnUsers(JSONObject meta) throws Fail {
+        ensureVpnScripts();
+        List<Integer> enabled = vpnEnabledUsers(meta);
+        StringBuilder sb = new StringBuilder();
+        for (int i = 0; i < enabled.size(); i++) {
+            if (i > 0) {
+                sb.append(' ');
+            }
+            sb.append(enabled.get(i));
+        }
+        String content = sb.toString();
+        try {
+            boolean needWrite = true;
+            if (exists(VPN_USERS_FILE)) {
+                needWrite = !readFile(VPN_USERS_FILE).trim().equals(content);
+            }
+            if (needWrite) {
+                try (Writer w = new OutputStreamWriter(new FileOutputStream(VPN_USERS_FILE, false), StandardCharsets.UTF_8)) {
+                    w.write(content + "\n");
+                }
+            }
+        } catch (IOException e) {
+            throw new Fail("写入 VPN 配置失败：" + e.getMessage());
+        }
+        run(15, "/system/bin/settings", "put", "global", VPN_USERS_KEY, content);
+        if (!enabled.isEmpty()) {
+            extractAsset("service-clone-vpn.sh", VPN_SERVICE, 0755);
+            run(20, "/system/bin/nsenter", "-t", "1", "-m", "--", "/system/bin/sh", VPN_SERVICE);
+            run(30, "/system/bin/nsenter", "-t", "1", "-m", "--", "/system/bin/sh", VPN_SCRIPT);
+            log("vpn users: [" + content + "]");
         } else {
             new File(VPN_SERVICE).delete();
-            Out r = run(30, "/system/bin/nsenter", "-t", "1", "-m", "--", "/system/bin/sh", VPN_SCRIPT, "--off");
-            if (vpnGuardEnabled()) {
-                throw new Fail(r.text.isEmpty() ? "关闭 VPN 断网保护失败" : r.text);
-            }
-            log("vpn guard off");
+            run(30, "/system/bin/nsenter", "-t", "1", "-m", "--", "/system/bin/sh", VPN_SCRIPT, "--off");
+            log("vpn users: [] (all off)");
         }
     }
 
-    static JSONObject opVpn(Object onArg) throws Exception {
+    static void setVpnGuard(boolean on) throws Fail {
+        JSONObject meta = syncMeta(cloneUsers());
+        for (String key : iterable(meta.keys())) {
+            JSONObject entry = meta.optJSONObject(key);
+            if (entry != null) {
+                try {
+                    entry.put("vpn", on);
+                } catch (JSONException ignored) {
+                }
+            }
+        }
+        writeMeta(meta);
+        syncVpnUsers(meta);
+    }
+
+    static JSONObject opVpn(Object userArg, Object onArg) throws Exception {
         if (!(onArg instanceof Boolean)) {
             throw new Fail("开关参数不正确");
         }
-        setVpnGuard((Boolean) onArg);
-        return new JSONObject().put("ok", true).put("vpn_guard", vpnGuardEnabled());
+        boolean on = (Boolean) onArg;
+        if (userArg == null) {
+            setVpnGuard(on);
+            return new JSONObject().put("ok", true).put("vpn_guard", vpnGuardEnabled());
+        }
+        int user = checkUser(userArg);
+        JSONObject meta = syncMeta(cloneUsers());
+        JSONObject entry = meta.optJSONObject(String.valueOf(user));
+        if (entry == null) {
+            entry = new JSONObject();
+            meta.put(String.valueOf(user), entry);
+        }
+        entry.put("vpn", on);
+        writeMeta(meta);
+        syncVpnUsers(meta);
+        log("vpn " + user + " " + (on ? "on" : "off"));
+        return new JSONObject().put("ok", true).put("user", user).put("vpn", on);
     }
 
     static String resolveComponent(String pkg) throws Fail {
@@ -911,7 +979,21 @@ final class Backend {
         }
         JSONObject meta = syncMeta(users);
         syncBadges(meta);
-        boolean vpnGuard = vpnGuardEnabled();
+        Set<Integer> vpnSet = new HashSet<>(vpnEnabledUsers(meta));
+        if (!exists(VPN_USERS_FILE) && !vpnSet.isEmpty()) {
+            try {
+                for (int uid : vpnSet) {
+                    JSONObject m = meta.optJSONObject(String.valueOf(uid));
+                    if (m != null && !m.has("vpn")) {
+                        m.put("vpn", true);
+                    }
+                }
+                writeMeta(meta);
+                syncVpnUsers(meta);
+            } catch (Exception ignored) {
+            }
+        }
+        boolean vpnGuard = !vpnSet.isEmpty();
         if (vpnGuard) {
             try {
                 ensureVpnScripts();
@@ -937,6 +1019,7 @@ final class Backend {
             Boolean g = gms.get(c.id);
             clones.put(new JSONObject().put("user", c.id).put("name", c.name).put("apps", apps)
                     .put("gms", g == null ? JSONObject.NULL : g)
+                    .put("vpn", vpnSet.contains(c.id))
                     .put("no", look == null ? 0 : look.optInt("no", 0))
                     .put("color", look == null || !look.has("color") ? JSONObject.NULL : look.optString("color"))
                     .put("text", look == null || !look.has("text") ? JSONObject.NULL : look.optString("text")));
@@ -1880,6 +1963,17 @@ final class Backend {
         // Some packages arrive in a new clone when the user first starts
         // (seen: Samsung Contacts and its overlay); one more pass for those.
         trimUser(uid, false, new HashSet<>(tried));
+        try {
+            JSONObject updatedMeta = syncMeta(cloneUsers());
+            JSONObject entry = updatedMeta.optJSONObject(String.valueOf(uid));
+            if (entry != null && !entry.has("vpn")) {
+                entry.put("vpn", false);
+                writeMeta(updatedMeta);
+            }
+            syncVpnUsers(updatedMeta);
+        } catch (Exception e) {
+            log("vpn init " + uid + ": " + e.getMessage());
+        }
         return uid;
     }
 
@@ -1907,6 +2001,13 @@ final class Backend {
             throw new Fail(r.text.isEmpty() ? "删除分身失败" : r.text);
         }
         new File(trimRecord(user)).delete();
+        try {
+            JSONObject meta = syncMeta(cloneUsers());
+            meta.remove(String.valueOf(user));
+            writeMeta(meta);
+            syncVpnUsers(meta);
+        } catch (Exception ignored) {
+        }
         dropOrphanIcons();
         log("delete " + user);
         return new JSONObject().put("ok", true);
@@ -2144,7 +2245,7 @@ final class Backend {
                 case "gms":
                     return opGms(user, req.opt("on"));
                 case "vpn":
-                    return opVpn(req.opt("on"));
+                    return opVpn(user, req.opt("on"));
                 case "create":
                     return opCreate();
                 case "delete":

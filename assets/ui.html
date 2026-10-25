@@ -914,6 +914,8 @@ function render(animCls) {
       '<div class="chips">' +
         '<span class="chip">用户 ' + c.user + '</span>' +
         '<span class="chip badge-chip"><i></i>桌面角标 ' + esc(bText) + '</span>' +
+        (c.vpn ? '<span class="chip on"><i></i>共享 VPN</span>' : '') +
+        (c.gms ? '<span class="chip on"><i></i>GMS</span>' : '') +
       '</div>' +
     '</div>' +
     '<button class="edit-pill" type="button" aria-label="编辑外观与名称">' + icon("edit") + '外观</button>' +
@@ -966,6 +968,16 @@ function render(animCls) {
       '<span class="switch"><input type="checkbox" id="gms"' + (c.gms ? " checked" : "") + '><i></i></span>' +
     '</label>';
   }
+  html += '<label class="row setting">' +
+      '<div class="row-lead-icon">' + icon("shield") + '</div>' +
+      '<div class="grow">' +
+        '<div class="t">分身共享 VPN 与防泄漏</div>' +
+        '<div class="s">' + (c.vpn
+          ? "已开启：此分身流量走主用户 VPN (tun*)，断开时阻断防泄漏"
+          : "已关闭：此分身直连普通网络，不经过主用户 VPN") + '</div>' +
+      '</div>' +
+      '<span class="switch"><input type="checkbox" id="vpnGuard"' + (c.vpn ? " checked" : "") + '><i></i></span>' +
+    '</label>';
   html += '<div class="row plain tap danger" data-act="delete">' +
       '<div class="row-lead-icon">' + icon("trash") + '</div>' +
       '<div class="grow">' +
@@ -974,20 +986,6 @@ function render(animCls) {
       '</div>' +
     '</div>' +
   '</div>';
-
-  html += '<div class="sec-head"><div class="sec-title"><span>网络保护</span></div></div>' +
-    '<div class="card">' +
-      '<label class="row setting">' +
-        '<div class="row-lead-icon">' + icon("shield") + '</div>' +
-        '<div class="grow">' +
-          '<div class="t">分身 VPN 断网保护 (Kill Switch)</div>' +
-          '<div class="s">' + (S.vpnGuard
-            ? "已开启：分身流量仅走主用户 VPN (tun*)，断开时阻断连接"
-            : "已关闭：未连接 VPN 时允许分身直连网络") + '</div>' +
-        '</div>' +
-        '<span class="switch"><input type="checkbox" id="vpnGuard"' + (S.vpnGuard ? " checked" : "") + '><i></i></span>' +
-      '</label>' +
-    '</div>';
 
   html += footnote();
   main.innerHTML = html;
@@ -1157,7 +1155,7 @@ async function busy(text, note, fn) {
 // ---- actions ----------------------------------------------------------------
 
 async function createClone() {
-  const res = await busy("新建分身", "创建用户并精简系统组件，耗时约两分钟",
+  const res = await busy("新建分身", "创建用户并预精简系统组件，仅需数秒",
     () => api({op: "create"}));
   if (!res.ok) return toast(res.error || "创建失败", true);
   await refresh();
@@ -1184,15 +1182,15 @@ async function deleteClone(c) {
 }
 
 async function setGms(c, on) {
-  const res = await busy(on ? "开启 Google 服务" : "关闭 Google 服务", "",
+  const res = await busy(on ? "开启 Google 服务" : "关闭 Google 服务", c.name,
     () => api({op: "gms", user: c.user, on: on}));
   if (!res.ok) toast(res.error || "操作失败", true);
   await refresh();
 }
 
-async function setVpnGuard(on) {
-  const res = await busy(on ? "开启 VPN 断网保护" : "关闭 VPN 断网保护", "",
-    () => api({op: "vpn", on: on}));
+async function setVpnGuard(c, on) {
+  const res = await busy(on ? "开启分身共享 VPN" : "关闭分身共享 VPN", c.name,
+    () => api({op: "vpn", user: c.user, on: on}));
   if (!res.ok) toast(res.error || "操作失败", true);
   await refresh();
 }
@@ -1528,14 +1526,14 @@ async function addAnother(pkg) {
   if (creating) {
     const ok = await dialog({
       title: "新建分身并安装？",
-      body: "现有分身均已安装「" + label(pkg) + "」。是否新建分身并安装？（耗时约两分钟）",
+      body: "现有分身均已安装「" + label(pkg) + "」。是否新建分身并安装？（仅需数秒）",
       buttons: [{text: "取消"}, {text: "新建并安装", value: true, kind: "primary"}]
     });
     if (!ok) return;
   }
   const res = await busy(
     creating ? "新建分身" : "安装至" + next.name,
-    creating ? "创建后安装" + label(pkg) + "，耗时约两分钟" : label(pkg),
+    creating ? "创建后安装" + label(pkg) + "，仅需数秒" : label(pkg),
     () => api({op: "add", pkg: pkg}));
   if (!res.ok) return toast(res.error || "安装失败", true);
   if (res.created) closePicker();
@@ -1634,7 +1632,7 @@ $("main").onclick = e => {
 $("main").onchange = e => {
   const c = current();
   if (e.target.id === "gms" && c) setGms(c, e.target.checked);
-  else if (e.target.id === "vpnGuard") setVpnGuard(e.target.checked);
+  else if (e.target.id === "vpnGuard" && c) setVpnGuard(c, e.target.checked);
 };
 
 // Interactive horizontal swipe on <main> to switch between clones
