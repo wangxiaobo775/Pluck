@@ -1413,7 +1413,6 @@ final class Backend {
     static final Set<String> TRIM_KEEP = new HashSet<>(Arrays.asList(
             // Motorola's whitelist-app-clone.xml, in this firmware's names
             "com.samsung.android.permissioncontroller",
-            "com.android.printspooler",
             "com.google.android.webview",
             "com.google.android.gms",
             "com.google.android.gsf",
@@ -1421,7 +1420,6 @@ final class Backend {
             "com.samsung.android.providers.contacts",
             // Providers and services apps call from inside their own user
             "com.android.externalstorage",
-            "com.android.providers.calendar",
             "com.android.providers.contactkeys",
             "com.android.providers.downloads",
             "com.android.providers.downloads.ui",
@@ -1441,20 +1439,16 @@ final class Backend {
             "com.samsung.android.secsoundpicker",
             "com.android.systemui",
             // Mainline modules and their shims
-            "com.google.android.configupdater",
             "com.google.android.ext.services",
             "com.google.android.ext.shared",
             "com.google.android.modulemetadata",
             // Keyboard fallback when SysGuard's ime hooks are off
             "com.samsung.android.honeyboard",
-            "com.samsung.android.sdk.handwriting",
             // Apps in a clone load the updatable GPU driver from their own user
             "com.qualcomm.qti.gpudrivers.canoe.api36",
             "com.samsung.gamedriver.sm8850",
-            // OAID for Chinese apps; payment and DRM helpers apps bind to
+            // OAID for Chinese apps; DRM helper apps bind to
             "com.samsung.android.deviceidservice",
-            "com.unionpay.tsmservice",
-            "com.sec.android.app.billing",
             "com.samsung.drmboost",
             // Location providers
             "com.samsung.android.location",
@@ -1564,7 +1558,28 @@ final class Backend {
             "com.sec.android.smartfpsadjuster",
             "com.qti.snapdragon.qdcm_ff",
             "com.samsung.android.app.sharelive",
-            "com.samsung.chn.apps.devicemanagement"));
+            "com.samsung.chn.apps.devicemanagement",
+            // Call UI, MMS, cell broadcast, IMS video, and main-user-only daemons
+            "com.samsung.android.incallui",
+            "com.samsung.android.callbgprovider",
+            "com.google.android.cellbroadcastservice",
+            "com.android.mms.service",
+            "com.android.ons",
+            "com.sec.imsservice",
+            "com.samsung.android.imsdcservice",
+            "com.sec.sve",
+            "com.samsung.android.qmdservice",
+            "com.samsung.android.sead",
+            "com.samsung.android.hdmapp",
+            "com.android.localtransport",
+            "com.samsung.accessibility",
+            "com.samsung.android.activation",
+            "com.samsung.android.sskds",
+            "com.samsung.android.knox.mpos",
+            "com.samsung.android.knox.zt.framework",
+            "com.samsung.hidden.china",
+            "com.sec.android.llmpolicy",
+            "com.samsung.android.vdcservice"));
     static final String TRIM_PAUSE = "0.2"; // seconds between uninstalls; each one is a broadcast in system_server
     static final Pattern SYSTEM_PKG_LINE = Pattern.compile("^package:(\\S+) uid:(\\d+)");
     static final Pattern OVERLAY_LINE = Pattern.compile("^\\s*\\[.\\]\\s*(\\S+)", Pattern.MULTILINE);
@@ -1607,7 +1622,7 @@ final class Backend {
                     && !keep.contains(pkg)
                     && !overlays.contains(pkg)
                     && !OVERLAY_NAME.matcher(pkg).find()
-                    && !HIDDEN.contains(pkg)) {
+                    && (!HIDDEN.contains(pkg) || LAUNCHER.equals(pkg))) {
                 plan.add(pkg);
             }
         }
